@@ -459,7 +459,7 @@ async def _run_agent(history: list, uploaded_files: dict):
         history.append({"role": "assistant", "content": assistant_content})
 
         # ── Exécuter les outils ──
-        tool_results = []   a
+        tool_results = []
         for tc in tool_calls:
             result = await _execute_tool(tc["name"], tc["input"], uploaded_files)
             tool_results.append({
@@ -776,65 +776,99 @@ async def _execute_tool(name: str, inputs: dict, uploaded_files: dict) -> str:
         import pandas as pd
         data_source = None
 
-        async with cl.Step(name=f"📈 {title}") as step:
+        try:
+            async with cl.Step(name=f"📈 {title}") as step:
 
-            # Chargement des données
-            if filename:
-                fp = uploaded_files.get(filename) or os.path.join(UPLOAD_DIR, filename)
-                if not Path(fp).exists():
-                    return f"Fichier '{filename}' introuvable."
-                step.output = f"→ Chargement {filename}..."
-                fr = await excel_tool.load_file(fp)
-                if not fr["success"]:
-                    return fr["error"]
-                data_source = fr["dataframe"]
-                step.output = f"✅ {fr['info']['rows']} lignes chargées"
+                # Chargement des données
+                if filename:
+                    fp = uploaded_files.get(filename) or os.path.join(UPLOAD_DIR, filename)
+                    if not Path(fp).exists():
+                        return f"Fichier '{filename}' introuvable."
+                    step.output = f"→ Chargement {filename}..."
+                    fr = await excel_tool.load_file(fp)
+                    if not fr["success"]:
+                        return fr["error"]
+                    data_source = fr["dataframe"]
+                    step.output = f"✅ {fr['info']['rows']} lignes chargées"
 
-            elif api_url:
-                step.output = f"→ Appel API {api_url[:50]}..."
-                fr = await bi_tool.fetch_api_data(url=api_url, api_key=api_key, auth_type=auth_type)
-                if not fr["success"]:
-                    return f"Erreur API : {fr['error']}"
-                data_source = fr["data"]
-                step.output = "✅ Données récupérées"
-            else:
-                return "Fournir api_url ou uploader un fichier."
+                elif api_url:
+                    step.output = f"→ Appel API {api_url[:50]}..."
+                    try:
+                        fr = await bi_tool.fetch_api_data(url=api_url, api_key=api_key, auth_type=auth_type)
+                        if not fr["success"]:
+                            error_msg = f"Erreur API : {fr.get('error', 'Erreur inconnue')}"
+                            step.output = f"❌ {error_msg}"
+                            await cl.Message(content=f"❌ {error_msg}").send()
+                            return error_msg
+                        data_source = fr["data"]
+                        step.output = "✅ Données récupérées"
+                    except Exception as e:
+                        error_msg = f"❌ Erreur lors de l'appel API : {str(e)}"
+                        step.output = error_msg
+                        await cl.Message(content=error_msg).send()
+                        return error_msg
+                else:
+                    return "Fournir api_url ou uploader un fichier."
 
-            if not isinstance(data_source, pd.DataFrame):
-                data_source = bi_tool.normalize_data(data_source)
-            if data_source is None or data_source.empty:
-                return "Impossible de convertir les données en tableau."
+                if not isinstance(data_source, pd.DataFrame):
+                    try:
+                        data_source = bi_tool.normalize_data(data_source)
+                    except Exception as e:
+                        error_msg = f"❌ Erreur normalisation données : {str(e)}"
+                        step.output = error_msg
+                        await cl.Message(content=error_msg).send()
+                        return error_msg
 
-            step.output = f"→ Génération du rapport ({export})..."
-            bi_result = await bi_tool.full_report(
-                data=data_source, title=title,
-                api_url=api_url, chart_configs=chart_cfgs,
-                export=export, theme=theme,
-            )
+                if data_source is None or data_source.empty:
+                    return "Impossible de convertir les données en tableau."
 
-            if not bi_result["success"]:
-                return f"Erreur : {bi_result['error']}"
+                step.output = f"→ Génération du rapport ({export})..."
+                try:
+                    bi_result = await bi_tool.full_report(
+                        data=data_source, title=title,
+                        api_url=api_url, chart_configs=chart_cfgs,
+                        export=export, theme=theme,
+                    )
 
-            step.output = f"✅ {bi_result['shape']}"
+                    if not bi_result["success"]:
+                        error_msg = f"Erreur : {bi_result.get('error', 'Erreur inconnue')}"
+                        step.output = f"❌ {error_msg}"
+                        await cl.Message(content=f"❌ {error_msg}").send()
+                        return error_msg
 
-        # Afficher les fichiers
-        msgs = [f"✅ **{title}** — {bi_result['shape']}"]
-        elements = []
-        for key, label, icon in [("html_path", "Dashboard HTML", "📊"), ("pdf_path", "PDF", "📄"), ("excel_path", "Excel", "📗")]:
-            p = bi_result.get(key)
-            if p and Path(p).exists():
-                elements.append(cl.File(name=Path(p).name, path=p))
-                msgs.append(f"{icon} {label} : `{p}`")
+                    step.output = f"✅ {bi_result.get('shape', 'Généré')}"
+                except Exception as e:
+                    error_msg = f"❌ Erreur génération rapport : {str(e)}"
+                    step.output = error_msg
+                    await cl.Message(content=error_msg).send()
+                    return error_msg
 
-        await cl.Message(content="\n".join(msgs), elements=elements or None).send()
+            # Afficher les fichiers
+            msgs = [f"✅ **{title}** — {bi_result.get('shape', 'Généré')}"]
+            elements = []
+            for key, label, icon in [("html_path", "Dashboard HTML", "📊"), ("pdf_path", "PDF", "📄"), ("excel_path", "Excel", "📗")]:
+                p = bi_result.get(key)
+                if p and Path(p).exists():
+                    elements.append(cl.File(name=Path(p).name, path=p))
+                    msgs.append(f"{icon} {label} : `{p}`")
 
-        # Planification
-        if schedule and api_url:
-            sr = bi_tool.schedule_report(api_url=api_url, title=title, cron=schedule,
-                                          export=export, api_key=api_key)
-            await cl.Message(content=f"⏰ **Planifié :** {sr['message']}").send()
+            await cl.Message(content="\n".join(msgs), elements=elements or None).send()
 
-        return json.dumps({k: v for k, v in bi_result.items() if k not in ("data",)})
+            # Planification
+            if schedule and api_url:
+                try:
+                    sr = bi_tool.schedule_report(api_url=api_url, title=title, cron=schedule,
+                                                  export=export, api_key=api_key)
+                    await cl.Message(content=f"⏰ **Planifié :** {sr['message']}").send()
+                except Exception as e:
+                    await cl.Message(content=f"⚠️ Planification échouée : {str(e)}").send()
+
+            return json.dumps({k: v for k, v in bi_result.items() if k not in ("data",)}, default=str)
+
+        except Exception as e:
+            error_msg = f"❌ Erreur BI report : {str(e)}"
+            await cl.Message(content=error_msg).send()
+            return error_msg
 
     return f"Outil inconnu : {name}"
 

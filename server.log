@@ -1,0 +1,2 @@
+2026-05-26 15:16:17 - INFO - chainlit - Your app is available at http://localhost:8000
+ERROR:    [Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000): [winerror 10048] une seule utilisation de chaque adresse de socket (protocole/adresse réseau/port) est habituellement autorisée
